@@ -4431,6 +4431,7 @@ fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
             hide_agent_reasoning: false,
             show_raw_agent_reasoning: false,
             model_reasoning_effort: Some(ReasoningEffort::High),
+            plan_mode_model: None,
             plan_mode_reasoning_effort: None,
             model_reasoning_summary: Some(ReasoningSummary::Detailed),
             model_supports_reasoning_summaries: None,
@@ -4573,6 +4574,7 @@ fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
         hide_agent_reasoning: false,
         show_raw_agent_reasoning: false,
         model_reasoning_effort: None,
+        plan_mode_model: None,
         plan_mode_reasoning_effort: None,
         model_reasoning_summary: None,
         model_supports_reasoning_summaries: None,
@@ -4713,6 +4715,7 @@ fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
         hide_agent_reasoning: false,
         show_raw_agent_reasoning: false,
         model_reasoning_effort: None,
+        plan_mode_model: None,
         plan_mode_reasoning_effort: None,
         model_reasoning_summary: None,
         model_supports_reasoning_summaries: None,
@@ -4839,6 +4842,7 @@ fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
         hide_agent_reasoning: false,
         show_raw_agent_reasoning: false,
         model_reasoning_effort: Some(ReasoningEffort::High),
+        plan_mode_model: None,
         plan_mode_reasoning_effort: None,
         model_reasoning_summary: Some(ReasoningSummary::Detailed),
         model_supports_reasoning_summaries: None,
@@ -4891,6 +4895,66 @@ fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
 
     assert_eq!(expected_gpt5_profile_config, gpt5_profile_config);
 
+    Ok(())
+}
+
+#[test]
+fn plan_mode_model_reads_top_level_config() -> std::io::Result<()> {
+    let cfg: ConfigToml = toml::from_str(
+        r#"
+model = "gpt-5.3-codex"
+plan_mode_model = "gpt-5"
+"#,
+    )
+    .expect("TOML deserialization should succeed");
+
+    let cwd = TempDir::new()?;
+    std::fs::write(cwd.path().join(".git"), "gitdir: nowhere")?;
+    let codex_home = TempDir::new()?;
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides {
+            cwd: Some(cwd.path().to_path_buf()),
+            ..Default::default()
+        },
+        codex_home.path().to_path_buf(),
+    )?;
+
+    assert_eq!(config.model, Some("gpt-5.3-codex".to_string()));
+    assert_eq!(config.plan_mode_model, Some("gpt-5".to_string()));
+    Ok(())
+}
+
+#[test]
+fn plan_mode_model_uses_profile_precedence() -> std::io::Result<()> {
+    let cfg: ConfigToml = toml::from_str(
+        r#"
+model = "gpt-5.3-codex"
+plan_mode_model = "gpt-5"
+
+[profiles.deep]
+plan_mode_model = "gpt-5.4"
+"#,
+    )
+    .expect("TOML deserialization should succeed");
+
+    let cwd = TempDir::new()?;
+    std::fs::write(cwd.path().join(".git"), "gitdir: nowhere")?;
+    let codex_home = TempDir::new()?;
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides {
+            config_profile: Some("deep".to_string()),
+            cwd: Some(cwd.path().to_path_buf()),
+            ..Default::default()
+        },
+        codex_home.path().to_path_buf(),
+    )?;
+
+    assert_eq!(config.model, Some("gpt-5.3-codex".to_string()));
+    assert_eq!(config.plan_mode_model, Some("gpt-5.4".to_string()));
     Ok(())
 }
 

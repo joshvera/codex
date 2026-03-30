@@ -325,8 +325,8 @@ pub(crate) enum AppEvent {
         model: ModelPreset,
     },
 
-    /// Open the Plan-mode reasoning scope prompt for the selected model/effort.
-    OpenPlanReasoningScopePrompt {
+    /// Open the Plan-mode selection scope prompt for the selected model/effort.
+    OpenPlanSelectionScopePrompt {
         model: String,
         effort: Option<ReasoningEffort>,
     },
@@ -431,6 +431,9 @@ pub(crate) enum AppEvent {
     /// Update the Plan-mode-specific reasoning effort in memory.
     UpdatePlanModeReasoningEffort(Option<ReasoningEffort>),
 
+    /// Update the Plan-mode-specific model in memory.
+    UpdatePlanModeModel(Option<String>),
+
     /// Persist the acknowledgement flag for the full access warning prompt.
     PersistFullAccessWarningAcknowledged,
 
@@ -443,6 +446,9 @@ pub(crate) enum AppEvent {
 
     /// Persist the Plan-mode-specific reasoning effort.
     PersistPlanModeReasoningEffort(Option<ReasoningEffort>),
+
+    /// Persist the Plan-mode-specific model.
+    PersistPlanModeModel(Option<String>),
 
     /// Persist the acknowledgement flag for the model migration prompt.
     PersistModelMigrationPromptAcknowledged {

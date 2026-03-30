@@ -4257,9 +4257,9 @@ impl App {
             AppEvent::OpenReasoningPopup { model } => {
                 self.chat_widget.open_reasoning_popup(model);
             }
-            AppEvent::OpenPlanReasoningScopePrompt { model, effort } => {
+            AppEvent::OpenPlanSelectionScopePrompt { model, effort } => {
                 self.chat_widget
-                    .open_plan_reasoning_scope_prompt(model, effort);
+                    .open_plan_selection_scope_prompt(model, effort);
             }
             AppEvent::OpenAllModelsPopup { models } => {
                 self.chat_widget.open_all_models_popup(models);
@@ -4927,6 +4927,10 @@ impl App {
                 self.config.plan_mode_reasoning_effort = effort;
                 self.chat_widget.set_plan_mode_reasoning_effort(effort);
             }
+            AppEvent::UpdatePlanModeModel(model) => {
+                self.config.plan_mode_model = model.clone();
+                self.chat_widget.set_plan_mode_model(model);
+            }
             AppEvent::PersistFullAccessWarningAcknowledged => {
                 if let Err(err) = ConfigEditsBuilder::new(&self.config.codex_home)
                     .set_hide_full_access_warning(/*acknowledged*/ true)
@@ -5008,6 +5012,41 @@ impl App {
                         self.chat_widget.add_error_message(format!(
                             "Failed to save Plan mode reasoning effort: {err}"
                         ));
+                    }
+                }
+            }
+            AppEvent::PersistPlanModeModel(model) => {
+                let profile = self.active_profile.as_deref();
+                let segments = if let Some(profile) = profile {
+                    vec![
+                        "profiles".to_string(),
+                        profile.to_string(),
+                        "plan_mode_model".to_string(),
+                    ]
+                } else {
+                    vec!["plan_mode_model".to_string()]
+                };
+                let edit = if let Some(model) = model {
+                    ConfigEdit::SetPath {
+                        segments,
+                        value: model.into(),
+                    }
+                } else {
+                    ConfigEdit::ClearPath { segments }
+                };
+                if let Err(err) = ConfigEditsBuilder::new(&self.config.codex_home)
+                    .with_edits([edit])
+                    .apply()
+                    .await
+                {
+                    tracing::error!(error = %err, "failed to persist plan mode model");
+                    if let Some(profile) = profile {
+                        self.chat_widget.add_error_message(format!(
+                            "Failed to save Plan mode model for profile `{profile}`: {err}"
+                        ));
+                    } else {
+                        self.chat_widget
+                            .add_error_message(format!("Failed to save Plan mode model: {err}"));
                     }
                 }
             }

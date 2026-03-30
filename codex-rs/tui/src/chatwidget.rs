@@ -245,9 +245,9 @@ const MULTI_AGENT_ENABLE_TITLE: &str = "Enable subagents?";
 const MULTI_AGENT_ENABLE_YES: &str = "Yes, enable";
 const MULTI_AGENT_ENABLE_NO: &str = "Not now";
 const MULTI_AGENT_ENABLE_NOTICE: &str = "Subagents will be enabled in the next session.";
-const PLAN_MODE_REASONING_SCOPE_TITLE: &str = "Apply reasoning change";
-const PLAN_MODE_REASONING_SCOPE_PLAN_ONLY: &str = "Apply to Plan mode override";
-const PLAN_MODE_REASONING_SCOPE_ALL_MODES: &str = "Apply to global default and Plan mode override";
+const PLAN_MODE_SELECTION_SCOPE_TITLE: &str = "Apply model/reasoning change";
+const PLAN_MODE_SELECTION_SCOPE_PLAN_ONLY: &str = "Apply to Plan mode override";
+const PLAN_MODE_SELECTION_SCOPE_ALL_MODES: &str = "Apply to global default and Plan mode override";
 const CONNECTORS_SELECTION_VIEW_ID: &str = "connectors-selection";
 const TUI_STUB_MESSAGE: &str = "Not available in TUI yet.";
 
@@ -8033,7 +8033,7 @@ impl ChatWidget {
                 let description =
                     (!preset.description.is_empty()).then_some(preset.description.clone());
                 let model = preset.model.clone();
-                let should_prompt_plan_mode_scope = self.should_prompt_plan_mode_reasoning_scope(
+                let should_prompt_plan_mode_scope = self.should_prompt_plan_mode_selection_scope(
                     model.as_str(),
                     Some(preset.default_reasoning_effort),
                 );
@@ -8199,7 +8199,7 @@ impl ChatWidget {
     ) -> Vec<SelectionAction> {
         vec![Box::new(move |tx| {
             if should_prompt_plan_mode_scope {
-                tx.send(AppEvent::OpenPlanReasoningScopePrompt {
+                tx.send(AppEvent::OpenPlanSelectionScopePrompt {
                     model: model_for_action.clone(),
                     effort: effort_for_action,
                 });
@@ -8215,99 +8215,88 @@ impl ChatWidget {
         })]
     }
 
-    fn should_prompt_plan_mode_reasoning_scope(
+    fn should_prompt_plan_mode_selection_scope(
         &self,
         selected_model: &str,
         selected_effort: Option<ReasoningEffortConfig>,
     ) -> bool {
-        if !self.collaboration_modes_enabled()
-            || self.active_mode_kind() != ModeKind::Plan
-            || selected_model != self.current_model()
-        {
+        if !self.collaboration_modes_enabled() || self.active_mode_kind() != ModeKind::Plan {
             return false;
         }
 
         // Prompt whenever the selection is not a true no-op for both:
-        // 1) the active Plan-mode effective reasoning, and
+        // 1) the active Plan-mode effective model/reasoning, and
         // 2) the stored global defaults that would be updated by the fallback path.
-        selected_effort != self.effective_reasoning_effort()
+        selected_model != self.current_model()
+            || selected_effort != self.effective_reasoning_effort()
             || selected_model != self.current_collaboration_mode.model()
             || selected_effort != self.current_collaboration_mode.reasoning_effort()
     }
 
-    pub(crate) fn open_plan_reasoning_scope_prompt(
+    fn plan_mode_selection_label(model: &str, effort: Option<ReasoningEffortConfig>) -> String {
+        let reasoning_phrase = match effort {
+            Some(ReasoningEffortConfig::None) => "with no reasoning".to_string(),
+            Some(selected_effort) => format!(
+                "with {} reasoning",
+                Self::reasoning_effort_label(selected_effort).to_lowercase()
+            ),
+            None => "with default reasoning".to_string(),
+        };
+        format!("{model} {reasoning_phrase}")
+    }
+
+    pub(crate) fn open_plan_selection_scope_prompt(
         &mut self,
         model: String,
         effort: Option<ReasoningEffortConfig>,
     ) {
-        let reasoning_phrase = match effort {
-            Some(ReasoningEffortConfig::None) => "no reasoning".to_string(),
-            Some(selected_effort) => {
-                format!(
-                    "{} reasoning",
-                    Self::reasoning_effort_label(selected_effort).to_lowercase()
-                )
-            }
-            None => "the selected reasoning".to_string(),
-        };
-        let plan_only_description = format!("Always use {reasoning_phrase} in Plan mode.");
-        let plan_reasoning_source = if let Some(plan_override) =
-            self.config.plan_mode_reasoning_effort
-        {
-            format!(
-                "user-chosen Plan override ({})",
-                Self::reasoning_effort_label(plan_override).to_lowercase()
-            )
-        } else if let Some(plan_mask) = collaboration_modes::plan_mask(self.model_catalog.as_ref())
-        {
-            match plan_mask.reasoning_effort.flatten() {
-                Some(plan_effort) => format!(
-                    "built-in Plan default ({})",
-                    Self::reasoning_effort_label(plan_effort).to_lowercase()
-                ),
-                None => "built-in Plan default (no reasoning)".to_string(),
-            }
-        } else {
-            "built-in Plan default".to_string()
-        };
-        let all_modes_description = format!(
-            "Set the global default reasoning level and the Plan mode override. This replaces the current {plan_reasoning_source}."
-        );
-        let subtitle = format!("Choose where to apply {reasoning_phrase}.");
+        let selection_label = Self::plan_mode_selection_label(&model, effort);
+        let plan_only_description = format!("Always use {selection_label} in Plan mode.");
+        let all_modes_description =
+            format!("Use {selection_label} as the global default and in Plan mode.");
+        let subtitle = format!("Choose where to apply {selection_label}.");
 
         let plan_only_actions: Vec<SelectionAction> = vec![Box::new({
             let model = model.clone();
             move |tx| {
-                tx.send(AppEvent::UpdateModel(model.clone()));
+                tx.send(AppEvent::UpdatePlanModeModel(Some(model.clone())));
                 tx.send(AppEvent::UpdatePlanModeReasoningEffort(effort));
+                tx.send(AppEvent::PersistPlanModeModel(Some(model.clone())));
                 tx.send(AppEvent::PersistPlanModeReasoningEffort(effort));
             }
         })];
-        let all_modes_actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
-            tx.send(AppEvent::UpdateModel(model.clone()));
-            tx.send(AppEvent::UpdateReasoningEffort(effort));
-            tx.send(AppEvent::UpdatePlanModeReasoningEffort(effort));
-            tx.send(AppEvent::PersistPlanModeReasoningEffort(effort));
-            tx.send(AppEvent::PersistModelSelection {
-                model: model.clone(),
-                effort,
-            });
+        let all_modes_actions: Vec<SelectionAction> = vec![Box::new({
+            let all_modes_model = model;
+            move |tx| {
+                tx.send(AppEvent::UpdateModel(all_modes_model.clone()));
+                tx.send(AppEvent::UpdateReasoningEffort(effort));
+                tx.send(AppEvent::UpdatePlanModeModel(Some(all_modes_model.clone())));
+                tx.send(AppEvent::UpdatePlanModeReasoningEffort(effort));
+                tx.send(AppEvent::PersistPlanModeModel(Some(
+                    all_modes_model.clone(),
+                )));
+                tx.send(AppEvent::PersistPlanModeReasoningEffort(effort));
+                tx.send(AppEvent::PersistModelSelection {
+                    model: all_modes_model.clone(),
+                    effort,
+                });
+            }
         })];
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
-            title: Some(PLAN_MODE_REASONING_SCOPE_TITLE.to_string()),
+            title: Some(PLAN_MODE_SELECTION_SCOPE_TITLE.to_string()),
             subtitle: Some(subtitle),
             footer_hint: Some(standard_popup_hint_line()),
             items: vec![
                 SelectionItem {
-                    name: PLAN_MODE_REASONING_SCOPE_PLAN_ONLY.to_string(),
+                    name: PLAN_MODE_SELECTION_SCOPE_PLAN_ONLY.to_string(),
                     description: Some(plan_only_description),
                     actions: plan_only_actions,
                     dismiss_on_select: true,
                     ..Default::default()
                 },
                 SelectionItem {
-                    name: PLAN_MODE_REASONING_SCOPE_ALL_MODES.to_string(),
+                    name: PLAN_MODE_SELECTION_SCOPE_ALL_MODES.to_string(),
                     description: Some(all_modes_description),
                     actions: all_modes_actions,
                     dismiss_on_select: true,
@@ -8317,7 +8306,7 @@ impl ChatWidget {
             ..Default::default()
         });
         self.notify(Notification::PlanModePrompt {
-            title: PLAN_MODE_REASONING_SCOPE_TITLE.to_string(),
+            title: PLAN_MODE_SELECTION_SCOPE_TITLE.to_string(),
         });
     }
 
@@ -8372,9 +8361,9 @@ impl ChatWidget {
         if choices.len() == 1 {
             let selected_effort = choices.first().and_then(|c| c.stored);
             let selected_model = preset.model;
-            if self.should_prompt_plan_mode_reasoning_scope(&selected_model, selected_effort) {
+            if self.should_prompt_plan_mode_selection_scope(&selected_model, selected_effort) {
                 self.app_event_tx
-                    .send(AppEvent::OpenPlanReasoningScopePrompt {
+                    .send(AppEvent::OpenPlanSelectionScopePrompt {
                         model: selected_model,
                         effort: selected_effort,
                     });
@@ -8446,10 +8435,10 @@ impl ChatWidget {
             let model_for_action = model_slug.clone();
             let choice_effort = choice.stored;
             let should_prompt_plan_mode_scope =
-                self.should_prompt_plan_mode_reasoning_scope(model_slug.as_str(), choice_effort);
+                self.should_prompt_plan_mode_selection_scope(model_slug.as_str(), choice_effort);
             let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
                 if should_prompt_plan_mode_scope {
-                    tx.send(AppEvent::OpenPlanReasoningScopePrompt {
+                    tx.send(AppEvent::OpenPlanSelectionScopePrompt {
                         model: model_for_action.clone(),
                         effort: choice_effort,
                     });
@@ -9449,6 +9438,26 @@ impl ChatWidget {
         self.refresh_model_dependent_surfaces();
     }
 
+    /// Override the model used when Plan mode is active.
+    pub(crate) fn set_plan_mode_model(&mut self, model: Option<String>) {
+        self.config.plan_mode_model = model.clone();
+        if self.collaboration_modes_enabled()
+            && let Some(mask) = self.active_collaboration_mask.as_mut()
+            && mask.mode == Some(ModeKind::Plan)
+        {
+            if let Some(model) = model {
+                mask.model = Some(model);
+            } else if let Some(plan_mask) =
+                collaboration_modes::plan_mask(self.model_catalog.as_ref())
+            {
+                mask.model = plan_mask.model;
+            } else {
+                mask.model = None;
+            }
+        }
+        self.refresh_model_dependent_surfaces();
+    }
+
     /// Set the reasoning effort for the non-Plan collaboration mode.
     ///
     /// Does not touch the active Plan mask — Plan reasoning is controlled
@@ -9825,6 +9834,11 @@ impl ChatWidget {
         let previous_mode = self.active_mode_kind();
         let previous_model = self.current_model().to_string();
         let previous_effort = self.effective_reasoning_effort();
+        if mask.mode == Some(ModeKind::Plan)
+            && let Some(model) = self.config.plan_mode_model.as_ref()
+        {
+            mask.model = Some(model.clone());
+        }
         if mask.mode == Some(ModeKind::Plan)
             && let Some(effort) = self.config.plan_mode_reasoning_effort
         {
@@ -10356,6 +10370,11 @@ impl ChatWidget {
         text: String,
         mut collaboration_mode: CollaborationModeMask,
     ) {
+        if collaboration_mode.mode == Some(ModeKind::Plan)
+            && let Some(model) = self.config.plan_mode_model.as_ref()
+        {
+            collaboration_mode.model = Some(model.clone());
+        }
         if collaboration_mode.mode == Some(ModeKind::Plan)
             && let Some(effort) = self.config.plan_mode_reasoning_effort
         {
