@@ -7,6 +7,7 @@
 use super::*;
 use crate::app_event::AppEvent;
 use crate::app_event::ExitMode;
+use crate::app_event::PlanModeSelectionScopeChanges;
 #[cfg(not(target_os = "linux"))]
 use crate::app_event::RealtimeAudioDeviceKind;
 use crate::app_event_sender::AppEventSender;
@@ -2798,6 +2799,10 @@ async fn reasoning_selection_in_plan_mode_opens_selection_scope_prompt_event() {
         AppEvent::OpenPlanSelectionScopePrompt {
             model,
             effort: Some(_)
+            , scope_changes: PlanModeSelectionScopeChanges {
+                model_changed: false,
+                reasoning_changed: true,
+            }
         } if model == "gpt-5.1-codex-max"
     );
 }
@@ -2862,7 +2867,11 @@ async fn reasoning_selection_in_plan_mode_matching_plan_effort_but_different_glo
         event,
         AppEvent::OpenPlanSelectionScopePrompt {
             model,
-            effort: Some(ReasoningEffortConfig::Medium)
+            effort: Some(ReasoningEffortConfig::Medium),
+            scope_changes: PlanModeSelectionScopeChanges {
+                model_changed: false,
+                reasoning_changed: true,
+            },
         } if model == "gpt-5.1-codex-max"
     );
 }
@@ -2910,7 +2919,11 @@ async fn reasoning_selection_in_plan_mode_model_switch_opens_selection_scope_pro
         event,
         AppEvent::OpenPlanSelectionScopePrompt {
             model,
-            effort: Some(_)
+            effort: Some(_),
+            scope_changes: PlanModeSelectionScopeChanges {
+                model_changed: true,
+                ..
+            },
         } if model == "gpt-5"
     );
 }
@@ -2921,6 +2934,10 @@ async fn plan_selection_scope_popup_all_modes_persists_global_and_plan_override(
     chat.open_plan_selection_scope_prompt(
         "gpt-5.1-codex-max".to_string(),
         Some(ReasoningEffortConfig::High),
+        PlanModeSelectionScopeChanges {
+            model_changed: true,
+            reasoning_changed: true,
+        },
     );
 
     chat.handle_key_event(KeyEvent::from(KeyCode::Down));
@@ -3023,6 +3040,10 @@ async fn open_plan_selection_scope_prompt_sets_pending_notification() {
     chat.open_plan_selection_scope_prompt(
         "gpt-5.1-codex-max".to_string(),
         Some(ReasoningEffortConfig::High),
+        PlanModeSelectionScopeChanges {
+            model_changed: true,
+            reasoning_changed: true,
+        },
     );
 
     assert_matches!(
@@ -3115,6 +3136,10 @@ async fn plan_selection_scope_popup_mentions_selected_model_and_reasoning() {
     chat.open_plan_selection_scope_prompt(
         "gpt-5.1-codex-max".to_string(),
         Some(ReasoningEffortConfig::Medium),
+        PlanModeSelectionScopeChanges {
+            model_changed: true,
+            reasoning_changed: true,
+        },
     );
 
     let popup = render_bottom_popup(&chat, /*width*/ 100);
@@ -3132,9 +3157,114 @@ async fn plan_selection_scope_popup_mentions_selected_model_and_reasoning() {
 }
 
 #[tokio::test]
+async fn plan_selection_scope_popup_model_only_shows_model_language() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.1-codex-max")).await;
+    chat.open_plan_selection_scope_prompt(
+        "gpt-5.1-codex-max".to_string(),
+        Some(ReasoningEffortConfig::High),
+        PlanModeSelectionScopeChanges {
+            model_changed: true,
+            reasoning_changed: false,
+        },
+    );
+
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    let normalized_popup = popup.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(normalized_popup.contains("Choose where to apply gpt-5.1-codex-max."));
+    assert!(normalized_popup.contains("Always use gpt-5.1-codex-max in Plan mode."));
+    assert!(
+        normalized_popup.contains("Set gpt-5.1-codex-max as the global default and in Plan mode.")
+    );
+}
+
+#[tokio::test]
+async fn plan_selection_scope_popup_reasoning_only_shows_reasoning_language() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.1-codex-max")).await;
+    chat.open_plan_selection_scope_prompt(
+        "gpt-5.1-codex-max".to_string(),
+        Some(ReasoningEffortConfig::High),
+        PlanModeSelectionScopeChanges {
+            model_changed: false,
+            reasoning_changed: true,
+        },
+    );
+
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    let normalized_popup = popup.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(normalized_popup.contains("Choose where to apply high reasoning."));
+    assert!(normalized_popup.contains("Always use high reasoning in Plan mode."));
+    assert!(
+        normalized_popup.contains("Use high reasoning as the global default and in Plan mode.")
+    );
+}
+
+#[tokio::test]
+async fn plan_selection_scope_all_modes_reasoning_only_does_not_update_plan_model() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.1-codex-max")).await;
+    chat.open_plan_selection_scope_prompt(
+        "gpt-5.1-codex-max".to_string(),
+        Some(ReasoningEffortConfig::High),
+        PlanModeSelectionScopeChanges {
+            model_changed: false,
+            reasoning_changed: true,
+        },
+    );
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+
+    let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+    assert!(
+        events.iter().all(|event| !matches!(
+            event,
+            AppEvent::UpdatePlanModeModel(_) | AppEvent::PersistPlanModeModel(_)
+        )),
+        "expected no Plan-mode model updates when only reasoning changes; events: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AppEvent::UpdatePlanModeReasoningEffort(Some(ReasoningEffortConfig::High))
+        )),
+        "expected plan-mode reasoning update; events: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AppEvent::PersistPlanModeReasoningEffort(Some(ReasoningEffortConfig::High))
+        )),
+        "expected persisted plan-mode reasoning update; events: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AppEvent::UpdateReasoningEffort(Some(ReasoningEffortConfig::High))
+        )),
+        "expected global reasoning update; events: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+        event,
+        AppEvent::PersistModelSelection {
+            model,
+            effort: Some(ReasoningEffortConfig::High),
+            } if model == "gpt-5.1-codex-max"
+        )),
+        "expected global persistence to include the selected reasoning; events: {events:?}"
+    );
+}
+
+#[tokio::test]
 async fn plan_selection_scope_popup_mentions_default_reasoning_when_effort_is_unset() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.1-codex-max")).await;
-    chat.open_plan_selection_scope_prompt("gpt-5.1-codex-max".to_string(), /*effort*/ None);
+    chat.open_plan_selection_scope_prompt(
+        "gpt-5.1-codex-max".to_string(),
+        /*effort*/ None,
+        PlanModeSelectionScopeChanges {
+            model_changed: true,
+            reasoning_changed: true,
+        },
+    );
 
     let popup = render_bottom_popup(&chat, /*width*/ 100);
     assert!(popup.contains("with default reasoning"));
@@ -3146,6 +3276,10 @@ async fn plan_selection_scope_popup_plan_only_does_not_update_all_modes_selectio
     chat.open_plan_selection_scope_prompt(
         "gpt-5.1-codex-max".to_string(),
         Some(ReasoningEffortConfig::High),
+        PlanModeSelectionScopeChanges {
+            model_changed: true,
+            reasoning_changed: true,
+        },
     );
 
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));

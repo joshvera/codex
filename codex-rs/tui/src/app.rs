@@ -4257,9 +4257,13 @@ impl App {
             AppEvent::OpenReasoningPopup { model } => {
                 self.chat_widget.open_reasoning_popup(model);
             }
-            AppEvent::OpenPlanSelectionScopePrompt { model, effort } => {
+            AppEvent::OpenPlanSelectionScopePrompt {
+                model,
+                effort,
+                scope_changes,
+            } => {
                 self.chat_widget
-                    .open_plan_selection_scope_prompt(model, effort);
+                    .open_plan_selection_scope_prompt(model, effort, scope_changes);
             }
             AppEvent::OpenAllModelsPopup { models } => {
                 self.chat_widget.open_all_models_popup(models);

@@ -41,6 +41,18 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SandboxPolicy;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PlanModeSelectionScopeChanges {
+    pub(crate) model_changed: bool,
+    pub(crate) reasoning_changed: bool,
+}
+
+impl PlanModeSelectionScopeChanges {
+    pub(crate) fn requires_prompt(self) -> bool {
+        self.model_changed || self.reasoning_changed
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RealtimeAudioDeviceKind {
     Microphone,
     Speaker,
@@ -329,6 +341,7 @@ pub(crate) enum AppEvent {
     OpenPlanSelectionScopePrompt {
         model: String,
         effort: Option<ReasoningEffort>,
+        scope_changes: PlanModeSelectionScopeChanges,
     },
 
     /// Open the full model picker (non-auto models).
