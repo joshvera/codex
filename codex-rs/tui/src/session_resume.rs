@@ -12,14 +12,13 @@ use crate::cwd_prompt;
 use crate::cwd_prompt::CwdPromptAction;
 use crate::cwd_prompt::CwdPromptOutcome;
 use crate::cwd_prompt::CwdSelection;
-use crate::legacy_core::config::Config;
 use crate::tui::Tui;
 use codex_protocol::ThreadId;
-use codex_rollout::state_db::get_state_db;
+use codex_rollout::open_rollout_line_reader;
+use codex_state::StateRuntime;
 use codex_utils_path as path_utils;
 use serde::Deserialize;
 use serde_json::Value;
-use tokio::io::AsyncBufReadExt;
 
 #[derive(Default)]
 struct RolloutResumeState {
@@ -66,11 +65,11 @@ pub(crate) async fn resolve_session_thread_id(
 }
 
 pub(crate) async fn read_session_model(
-    config: &Config,
+    state_db_ctx: Option<&StateRuntime>,
     thread_id: ThreadId,
     path: Option<&Path>,
 ) -> Option<String> {
-    if let Some(state_db_ctx) = get_state_db(config).await
+    if let Some(state_db_ctx) = state_db_ctx
         && let Ok(Some(metadata)) = state_db_ctx.get_thread(thread_id).await
         && let Some(model) = metadata.model
     {
@@ -86,14 +85,14 @@ pub(crate) async fn read_session_model(
 
 pub(crate) async fn resolve_cwd_for_resume_or_fork(
     tui: &mut Tui,
-    config: &Config,
+    state_db_ctx: Option<&StateRuntime>,
     current_cwd: &Path,
     thread_id: ThreadId,
     path: Option<&Path>,
     action: CwdPromptAction,
     allow_prompt: bool,
 ) -> color_eyre::Result<ResolveCwdOutcome> {
-    let Some(history_cwd) = read_session_cwd(config, thread_id, path).await else {
+    let Some(history_cwd) = read_session_cwd(state_db_ctx, thread_id, path).await else {
         return Ok(ResolveCwdOutcome::Continue(None));
     };
     if allow_prompt && cwds_differ(current_cwd, &history_cwd) {
@@ -113,11 +112,11 @@ pub(crate) async fn resolve_cwd_for_resume_or_fork(
 }
 
 async fn read_session_cwd(
-    config: &Config,
+    state_db_ctx: Option<&StateRuntime>,
     thread_id: ThreadId,
     path: Option<&Path>,
 ) -> Option<PathBuf> {
-    if let Some(state_db_ctx) = get_state_db(config).await
+    if let Some(state_db_ctx) = state_db_ctx
         && let Ok(Some(metadata)) = state_db_ctx.get_thread(thread_id).await
     {
         return Some(metadata.cwd);
@@ -143,13 +142,11 @@ pub(crate) fn cwds_differ(current_cwd: &Path, session_cwd: &Path) -> bool {
 }
 
 async fn read_rollout_resume_state(path: &Path) -> io::Result<RolloutResumeState> {
-    let file = tokio::fs::File::open(path).await?;
-    let reader = tokio::io::BufReader::new(file);
-    let mut lines = reader.lines();
+    let mut reader = open_rollout_line_reader(path).await?;
     let mut state = RolloutResumeState::default();
     let mut saw_record = false;
 
-    while let Some(line) = lines.next_line().await? {
+    while let Some(line) = reader.next_line().await? {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;

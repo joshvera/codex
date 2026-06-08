@@ -118,7 +118,9 @@ mod tests {
     fn test_thread(thread_id: ThreadId, source: SessionSource) -> Thread {
         Thread {
             id: thread_id.to_string(),
+            session_id: thread_id.to_string(),
             forked_from_id: None,
+            parent_thread_id: None,
             preview: String::new(),
             ephemeral: false,
             model_provider: "openai".to_string(),
@@ -129,6 +131,7 @@ mod tests {
             cwd: test_path_buf("/tmp").abs(),
             cli_version: "0.0.0".to_string(),
             source,
+            thread_source: None,
             agent_nickname: None,
             agent_role: None,
             git_info: None,
