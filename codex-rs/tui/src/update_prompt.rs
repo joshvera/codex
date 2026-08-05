@@ -1,6 +1,5 @@
 #![cfg(not(debug_assertions))]
 
-use crate::history_cell::padded_emoji;
 use crate::key_hint;
 use crate::legacy_core::config::Config;
 use crate::render::Insets;
@@ -26,6 +25,8 @@ use ratatui::text::Line;
 use ratatui::widgets::Clear;
 use ratatui::widgets::WidgetRef;
 use tokio_stream::StreamExt;
+
+const RELEASE_NOTES_URL: &str = "https://github.com/openai/codex/releases/latest";
 
 pub(crate) enum UpdatePromptOutcome {
     Continue,
@@ -190,7 +191,7 @@ impl WidgetRef for &UpdatePromptScreen {
 
         column.push("");
         column.push(Line::from(vec![
-            padded_emoji("  ✨").bold().cyan(),
+            "  ✨\u{200A}".bold().cyan(),
             "Update available!".bold(),
             " ".into(),
             format!(
@@ -204,9 +205,7 @@ impl WidgetRef for &UpdatePromptScreen {
         column.push(
             Line::from(vec![
                 "Release notes: ".dim(),
-                "https://github.com/openai/codex/releases/latest"
-                    .dim()
-                    .underlined(),
+                RELEASE_NOTES_URL.dim().underlined(),
             ])
             .inset(Insets::tlbr(0, 2, 0, 0)),
         );
@@ -236,6 +235,7 @@ impl WidgetRef for &UpdatePromptScreen {
             .inset(Insets::tlbr(0, 2, 0, 0)),
         );
         column.render(area, buf);
+        crate::terminal_hyperlinks::mark_underlined_hyperlink(buf, area, RELEASE_NOTES_URL);
     }
 }
 

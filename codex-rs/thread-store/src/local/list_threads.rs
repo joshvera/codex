@@ -1,19 +1,17 @@
 use std::collections::HashMap;
-use std::collections::HashSet;
 
-use codex_protocol::ThreadId;
 use codex_rollout::RolloutConfig;
 use codex_rollout::RolloutRecorder;
-use codex_rollout::find_thread_names_by_ids;
 use codex_rollout::parse_cursor;
 
 use super::LocalThreadStore;
-use super::helpers::distinct_thread_metadata_title;
-use super::helpers::set_thread_name_from_title;
+use super::helpers::resolve_thread_names;
+use super::helpers::set_thread_name;
 use super::helpers::stored_thread_from_rollout_item;
 use crate::ListThreadsParams;
 use crate::SortDirection;
 use crate::ThreadPage;
+use crate::ThreadRelationFilter;
 use crate::ThreadSortKey;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
@@ -34,19 +32,22 @@ pub(super) async fn list_threads(
     let sort_key = match params.sort_key {
         ThreadSortKey::CreatedAt => codex_rollout::ThreadSortKey::CreatedAt,
         ThreadSortKey::UpdatedAt => codex_rollout::ThreadSortKey::UpdatedAt,
+        ThreadSortKey::RecencyAt => codex_rollout::ThreadSortKey::RecencyAt,
     };
     let sort_direction = match params.sort_direction {
         SortDirection::Asc => codex_rollout::SortDirection::Asc,
         SortDirection::Desc => codex_rollout::SortDirection::Desc,
     };
+    let state_db = store.state_db().await;
     let rollout_config = RolloutConfig {
         codex_home: store.config.codex_home.clone(),
-        sqlite_home: store.config.sqlite_home.clone(),
+        sqlite: store.config.sqlite.clone(),
         cwd: store.config.codex_home.clone(),
         model_provider_id: store.config.default_model_provider_id.clone(),
         generate_memories: false,
     };
     let page = list_rollout_threads(
+        state_db,
         &rollout_config,
         store.config.default_model_provider_id.as_str(),
         &params,
@@ -73,39 +74,22 @@ pub(super) async fn list_threads(
         })
         .collect::<Vec<_>>();
 
-    let thread_ids = items
+    let thread_history_modes = items
         .iter()
-        .map(|thread| thread.thread_id)
-        .collect::<HashSet<_>>();
-    let mut names = HashMap::<ThreadId, String>::with_capacity(thread_ids.len());
-    if let Some(state_db_ctx) = store.state_db().await {
-        for &thread_id in &thread_ids {
-            let Ok(Some(metadata)) = state_db_ctx.get_thread(thread_id).await else {
-                continue;
-            };
-            if let Some(title) = distinct_thread_metadata_title(&metadata) {
-                names.insert(thread_id, title);
-            }
-        }
-    }
-    if names.len() < thread_ids.len()
-        && let Ok(legacy_names) =
-            find_thread_names_by_ids(store.config.codex_home.as_path(), &thread_ids).await
-    {
-        for (thread_id, title) in legacy_names {
-            names.entry(thread_id).or_insert(title);
-        }
-    }
+        .map(|thread| (thread.thread_id, thread.history_mode))
+        .collect::<HashMap<_, _>>();
+    let names = resolve_thread_names(store, &thread_history_modes).await;
     for thread in &mut items {
-        if let Some(title) = names.get(&thread.thread_id).cloned() {
-            set_thread_name_from_title(thread, title);
+        if let Some(name) = names.get(&thread.thread_id).cloned() {
+            set_thread_name(thread, name);
         }
     }
 
     Ok(ThreadPage { items, next_cursor })
 }
 
-async fn list_rollout_threads(
+pub(super) async fn list_rollout_threads(
+    state_db: Option<codex_rollout::StateDbHandle>,
     config: &RolloutConfig,
     default_model_provider_id: &str,
     params: &ListThreadsParams,
@@ -113,8 +97,42 @@ async fn list_rollout_threads(
     sort_key: codex_rollout::ThreadSortKey,
     sort_direction: codex_rollout::SortDirection,
 ) -> ThreadStoreResult<codex_rollout::ThreadsPage> {
+    if params.relation_filter.is_some() || params.is_pinned.is_some() {
+        let relation_filter = params
+            .relation_filter
+            .map(|relation_filter| match relation_filter {
+                ThreadRelationFilter::DirectChildrenOf(parent_thread_id) => {
+                    codex_state::ThreadRelationFilter::DirectChildrenOf(parent_thread_id)
+                }
+                ThreadRelationFilter::DescendantsOf(ancestor_thread_id) => {
+                    codex_state::ThreadRelationFilter::DescendantsOf(ancestor_thread_id)
+                }
+            });
+        let page = codex_rollout::state_db::list_threads_db(
+            state_db.as_deref(),
+            &config.sqlite,
+            params.page_size,
+            cursor,
+            sort_key,
+            sort_direction,
+            params.allowed_sources.as_slice(),
+            params.model_providers.as_deref(),
+            params.cwd_filters.as_deref(),
+            relation_filter,
+            params.archived,
+            params.is_pinned,
+            params.search_term.as_deref(),
+        )
+        .await
+        .ok_or_else(|| ThreadStoreError::Internal {
+            message: "state DB unavailable for filtered thread listing".to_string(),
+        })?;
+        return Ok(page.into());
+    }
+
     let page = if params.use_state_db_only && params.archived {
         RolloutRecorder::list_archived_threads_from_state_db(
+            state_db,
             config,
             params.page_size,
             cursor,
@@ -129,6 +147,7 @@ async fn list_rollout_threads(
         .await
     } else if params.use_state_db_only {
         RolloutRecorder::list_threads_from_state_db(
+            state_db,
             config,
             params.page_size,
             cursor,
@@ -143,6 +162,7 @@ async fn list_rollout_threads(
         .await
     } else if params.archived {
         RolloutRecorder::list_archived_threads(
+            state_db,
             config,
             params.page_size,
             cursor,
@@ -157,6 +177,7 @@ async fn list_rollout_threads(
         .await
     } else {
         RolloutRecorder::list_threads(
+            state_db,
             config,
             params.page_size,
             cursor,
@@ -180,6 +201,8 @@ mod tests {
     use chrono::Utc;
     use codex_protocol::ThreadId;
     use codex_protocol::protocol::SessionSource;
+    use codex_protocol::protocol::ThreadHistoryMode;
+    use codex_utils_absolute_path::test_support::PathExt;
     use pretty_assertions::assert_eq;
     use std::fs;
     use tempfile::TempDir;
@@ -196,7 +219,7 @@ mod tests {
     #[tokio::test]
     async fn list_threads_uses_default_provider_when_rollout_omits_provider() {
         let home = TempDir::new().expect("temp dir");
-        let store = LocalThreadStore::new(test_config(home.path()));
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
         write_session_file_with(
             home.path(),
             home.path().join("sessions/2025/01/03"),
@@ -204,6 +227,7 @@ mod tests {
             Uuid::from_u128(102),
             "Hello from user",
             /*model_provider*/ None,
+            ThreadHistoryMode::Legacy,
         )
         .expect("session file");
 
@@ -216,8 +240,10 @@ mod tests {
                 allowed_sources: Vec::new(),
                 model_providers: None,
                 cwd_filters: None,
+                is_pinned: None,
                 archived: false,
                 search_term: None,
+                relation_filter: None,
                 use_state_db_only: false,
             })
             .await
@@ -231,18 +257,18 @@ mod tests {
     async fn list_threads_preserves_sqlite_title_search_results() {
         let home = TempDir::new().expect("temp dir");
         let config = test_config(home.path());
-        let store = LocalThreadStore::new(config.clone());
         let uuid = Uuid::from_u128(103);
         let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
         let rollout_path = home.path().join("rollout-title-search.jsonl");
         fs::write(&rollout_path, "").expect("placeholder rollout file");
 
         let runtime = codex_state::StateRuntime::init(
-            home.path().to_path_buf(),
+            codex_state::SqliteConfig::new_for_testing(home.path().abs()),
             config.default_model_provider_id.clone(),
         )
         .await
         .expect("state db should initialize");
+        let store = LocalThreadStore::new(config.clone(), Some(runtime.clone()));
         runtime
             .mark_backfill_complete(/*last_watermark*/ None)
             .await
@@ -260,6 +286,7 @@ mod tests {
         let mut metadata = builder.build(config.default_model_provider_id.as_str());
         metadata.title = "needle title".to_string();
         metadata.first_user_message = Some("plain preview".to_string());
+        metadata.preview = metadata.first_user_message.clone();
         runtime
             .upsert_thread(&metadata)
             .await
@@ -274,8 +301,10 @@ mod tests {
                 allowed_sources: Vec::new(),
                 model_providers: None,
                 cwd_filters: None,
+                is_pinned: None,
                 archived: false,
                 search_term: Some("needle".to_string()),
+                relation_filter: None,
                 use_state_db_only: true,
             })
             .await
@@ -294,9 +323,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_paginated_threads_uses_sqlite_name_over_legacy_compatibility() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let uuid = Uuid::from_u128(104);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
+        let rollout_path = home.path().join("rollout-paginated-name-search.jsonl");
+        fs::write(&rollout_path, "").expect("placeholder rollout file");
+
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = LocalThreadStore::new(config.clone(), Some(runtime.clone()));
+        runtime
+            .mark_backfill_complete(/*last_watermark*/ None)
+            .await
+            .expect("backfill should be complete");
+        let mut builder = codex_state::ThreadMetadataBuilder::new(
+            thread_id,
+            rollout_path,
+            Utc::now(),
+            SessionSource::Cli,
+        );
+        builder.history_mode = ThreadHistoryMode::Paginated;
+        builder.model_provider = Some(config.default_model_provider_id.clone());
+        builder.cwd = home.path().to_path_buf();
+        builder.cli_version = Some("test_version".to_string());
+        let mut metadata = builder.build(config.default_model_provider_id.as_str());
+        metadata.name = Some("canonical paginated name".to_string());
+        metadata.title = "stale title name".to_string();
+        metadata.first_user_message = Some("plain preview".to_string());
+        metadata.preview = metadata.first_user_message.clone();
+        runtime
+            .upsert_thread(&metadata)
+            .await
+            .expect("state db upsert should succeed");
+        codex_rollout::append_thread_name(home.path(), thread_id, "stale index name")
+            .await
+            .expect("append legacy thread name");
+
+        let page = store
+            .list_threads(ListThreadsParams {
+                page_size: 10,
+                cursor: None,
+                sort_key: ThreadSortKey::CreatedAt,
+                sort_direction: SortDirection::Desc,
+                allowed_sources: Vec::new(),
+                model_providers: None,
+                cwd_filters: None,
+                is_pinned: None,
+                archived: false,
+                search_term: Some("canonical".to_string()),
+                relation_filter: None,
+                use_state_db_only: true,
+            })
+            .await
+            .expect("thread listing");
+
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].thread_id, thread_id);
+        assert_eq!(
+            page.items[0].name.as_deref(),
+            Some("canonical paginated name")
+        );
+    }
+
+    #[tokio::test]
     async fn list_threads_selects_active_or_archived_collection() {
         let home = TempDir::new().expect("temp dir");
-        let store = LocalThreadStore::new(test_config(home.path()));
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
         let active_uuid = Uuid::from_u128(105);
         let archived_uuid = Uuid::from_u128(106);
         write_session_file(home.path(), "2025-01-03T12-00-00", active_uuid)
@@ -313,8 +411,10 @@ mod tests {
                 allowed_sources: Vec::new(),
                 model_providers: None,
                 cwd_filters: None,
+                is_pinned: None,
                 archived: false,
                 search_term: None,
+                relation_filter: None,
                 use_state_db_only: false,
             })
             .await
@@ -328,8 +428,10 @@ mod tests {
                 allowed_sources: Vec::new(),
                 model_providers: None,
                 cwd_filters: None,
+                is_pinned: None,
                 archived: true,
                 search_term: None,
+                relation_filter: None,
                 use_state_db_only: false,
             })
             .await
@@ -365,7 +467,7 @@ mod tests {
     async fn list_threads_returns_local_rollout_summary() {
         let home = TempDir::new().expect("temp dir");
         let config = test_config(home.path());
-        let store = LocalThreadStore::new(config);
+        let store = LocalThreadStore::new(config, /*state_db*/ None);
         let uuid = Uuid::from_u128(101);
         let path =
             write_session_file(home.path(), "2025-01-03T12-00-00", uuid).expect("session file");
@@ -379,8 +481,10 @@ mod tests {
                 allowed_sources: vec![SessionSource::Cli],
                 model_providers: Some(vec!["test-provider".to_string()]),
                 cwd_filters: None,
+                is_pinned: None,
                 archived: false,
                 search_term: None,
+                relation_filter: None,
                 use_state_db_only: false,
             })
             .await
@@ -404,7 +508,7 @@ mod tests {
     #[tokio::test]
     async fn list_threads_rejects_invalid_cursor() {
         let home = TempDir::new().expect("temp dir");
-        let store = LocalThreadStore::new(test_config(home.path()));
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
 
         let err = store
             .list_threads(ListThreadsParams {
@@ -415,8 +519,10 @@ mod tests {
                 allowed_sources: Vec::new(),
                 model_providers: None,
                 cwd_filters: None,
+                is_pinned: None,
                 archived: false,
                 search_term: None,
+                relation_filter: None,
                 use_state_db_only: false,
             })
             .await
